@@ -1,0 +1,5 @@
+google-genai
+requests
+gradio
+python-dotenv
+langchain
