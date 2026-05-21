@@ -5,79 +5,46 @@ sdk_version: "4.0"
 app_file: app.py
 ---
 
-# 🎬 Multi-Agent Movie Recommendation System
+# Multi-Agent Movie Recommendation System
 
-A multi-agent AI pipeline that recommends currently playing movies in Turkey based on the user's genre preference. Built as a university project.
+This project is a multi-agent movie recommendation app. The user selects a genre, and the system fetches now-playing movies in Turkey from TMDB, evaluates candidates through four agents, and returns top recommendations with Turkish explanations and quality scoring.
 
-## How It Works
+## 4-Agent Architecture
 
-The user selects a genre. Four agents run in sequence:
+The pipeline runs in this order:
 
 ```
 User (genre) → Discovery → Comparison → Sentiment → Evaluation → UI
 ```
 
-| Agent | Task | LLM |
+| Agent | Responsibility | LLM |
 |---|---|---|
-| Discovery | Fetches now-playing movies from TMDB for Turkey, filters by score and language | ❌ |
-| Comparison | Selects top 3 films based on genre match and vote average | ✅ |
-| Sentiment & Explanation | Fetches TMDB reviews, analyzes sentiment, generates Turkish explanations | ✅ |
-| Evaluation | Audits the full decision chain, gives a quality score | ✅ |
+| Discovery Agent | Fetches `/movie/now_playing` for `region=TR`, paginates, filters by score/language | No |
+| Comparison Agent | Chooses top 3 films from filtered list based on genre relevance and rating | Yes |
+| Sentiment Agent | Fetches TMDB reviews for selected films and generates sentiment + Turkish explanations | Yes |
+| Evaluation Agent | Audits full decision chain and returns overall/per-film quality feedback | Yes |
 
-## Tech Stack
+## HuggingFace Spaces Setup
 
-- **LLM:** Google Gemini (`gemini-3-flash-preview`) via `google-genai` SDK
-- **Movie Data:** TMDB API (free tier, `region=TR`)
-- **UI:** Gradio
-- **Deploy:** HuggingFace Spaces
+Use these repository files:
+- `app.py` as the Gradio entrypoint
+- `requirements.txt` for dependencies
 
-## Local Setup
-
-```bash
-git clone https://github.com/OmerINKAYA/MovieAgent.git
-cd MovieAgent
-
-python -m venv venv
-source venv/bin/activate      # Windows: venv\Scripts\activate
-
-pip install -r requirements.txt
-```
-
-Create a `.env` file in the project root:
-
-```
-TMDB_API_KEY=your_tmdb_api_key
-GEMINI_API_KEY=your_gemini_api_key
-```
-
-Run the app:
-
-```bash
-python app.py
-```
-
-## HuggingFace Spaces Deploy
-
-This project is designed to run on HuggingFace Spaces. Before deploying, add the following secrets under **Settings → Variables and secrets**:
+Before running the Space, add these secrets in **Settings → Variables and secrets**:
 
 ```
 TMDB_API_KEY
 GEMINI_API_KEY
 ```
 
-Do **not** push your `.env` file or API keys to the repository.
+The app reads these keys from environment variables (or local `.env` with `python-dotenv`).
 
-## Project Structure
+## Dependencies
 
 ```
-project/
-├── agents.md
-├── discovery_agent.py
-├── comparison_agent.py
-├── sentiment_agent.py
-├── evaluation_agent.py
-├── orchestrator.py
-├── app.py
-├── requirements.txt
-└── README.md
+google-genai
+requests
+gradio
+python-dotenv
+langchain
 ```

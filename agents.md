@@ -11,7 +11,7 @@ A multi-agent AI pipeline that recommends currently playing movies in Turkey bas
 | Layer | Technology |
 |---|---|
 | Language | Python 3.10+ |
-| LLM | Google Gemini (`gemini-3-flash-preview`) |
+| LLM | Google Gemini (`gemini-3.1-flash-lite`) |
 | LLM SDK | `google-genai` (new SDK, NOT `google.generativeai`) |
 | Movie Data | TMDB API (free tier) |
 | Framework | LangChain (orchestration) |
@@ -183,4 +183,4 @@ project/
 - Log agent start, input size, and output summary using Python `logging` (INFO level)
 - Never raise unhandled exceptions — catch API errors and return meaningful messages
 - Use `google-genai` SDK: `from google import genai` and `from google.genai import types`
-- Model name for all LLM calls: `gemini-3-flash-preview`
+- Model name for all LLM calls: `gemini-3.1-flash-lite`
