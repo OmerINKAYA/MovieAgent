@@ -1,13 +1,12 @@
 import json
 import logging
 import os
-from concurrent.futures import ThreadPoolExecutor
 from typing import Any
 
-import requests
-from google.genai import types
+from openai import OpenAI
 
 from _llm_client import LLMClient
+from debug_logger import format_json, write_debug_file
 
 
 logging.basicConfig(level=logging.INFO)
@@ -15,31 +14,109 @@ logger = logging.getLogger(__name__)
 
 
 class SentimentAgent(LLMClient):
-    TMDB_BASE_URL = "https://api.themoviedb.org/3"
-    MODEL_NAME = "gemini-3.1-flash-lite"
+    MODEL_NAME = "meta/llama-3.3-70b-instruct"
+    LLM_TIMEOUT_SECONDS = 20.0
 
     def __init__(self) -> None:
         super().__init__()
-        self.tmdb_api_key = os.getenv("TMDB_API_KEY")
-
-    def _fetch_reviews(self, movie_id: int) -> list[dict[str, Any]]:
-        if not self.tmdb_api_key:
-            raise ValueError("TMDB_API_KEY is missing in environment variables.")
-
-        response = requests.get(
-            f"{self.TMDB_BASE_URL}/movie/{movie_id}/reviews",
-            params={
-                "api_key": self.tmdb_api_key,
-                "language": "en-US",
-                "page": 1,
-            },
-            timeout=20,
+        api_key = os.getenv("NVIM_API_KEY")
+        self.client = (
+            OpenAI(
+                base_url="https://integrate.api.nvidia.com/v1",
+                api_key=api_key,
+                timeout=self.LLM_TIMEOUT_SECONDS,
+                max_retries=0,
+            )
+            if api_key
+            else None
         )
-        response.raise_for_status()
-        results = response.json().get("results", [])
-        return results[:5]
 
-    def run(self, comparison_output: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _sentiment_from_vote_average(vote_average: float) -> str:
+        if 0.0 <= vote_average <= 5.0:
+            if vote_average >= 4.2:
+                return "positive"
+            if vote_average >= 3.2:
+                return "mixed"
+            return "negative"
+        if vote_average >= 7.0:
+            return "positive"
+        if vote_average >= 5.0:
+            return "mixed"
+        return "negative"
+
+    def _fallback_sentiment(
+        self,
+        top3: list[dict[str, Any]],
+        all_movies: list[dict[str, Any]],
+        preferred_genre: str,
+        selection_logic: str,
+        reviews_fetched: dict[str, int] | None = None,
+        warning: str = "fallback_sentiment_used",
+        run_id: str = "",
+    ) -> dict[str, Any]:
+        movie_by_title = {movie.get("title", ""): movie for movie in all_movies}
+        enriched_top3 = []
+
+        for index, item in enumerate(top3, start=1):
+            title = item.get("title", "")
+            movie = movie_by_title.get(title, {})
+            vote_average = float(movie.get("vote_average", 0.0) or 0.0)
+            comments = movie.get("biletinial_comments", [])
+            comment_ratings = [
+                float(comment.get("rating"))
+                for comment in comments
+                if isinstance(comment.get("rating"), (int, float))
+            ]
+            if comment_ratings:
+                vote_average = sum(comment_ratings) / len(comment_ratings)
+            overview = str(movie.get("overview", "")).strip()
+            reason = str(item.get("reason", "")).strip()
+            local_score = movie.get("biletinial_rating") or vote_average
+            local_count = movie.get("biletinial_comment_count") or len(comments)
+            review_snippets = [
+                str(comment.get("content", "")).strip()
+                for comment in comments[:3]
+                if str(comment.get("content", "")).strip()
+            ]
+            if comments:
+                details = (
+                    f"Biletinial audience data was used: local score {local_score:.1f}/5 "
+                    f"from {local_count} comments. Comment quality and genre fit should be judged strictly. "
+                    f"{reason or overview}"
+                ).strip()
+            else:
+                details = reason or overview or "Local rating and available metadata were used for this recommendation."
+
+            enriched_top3.append(
+                {
+                    "rank": item.get("rank", index),
+                    "title": title,
+                    "sentiment": self._sentiment_from_vote_average(vote_average),
+                    "explanation": details,
+                    "review_snippets": review_snippets,
+                }
+            )
+
+        output = {
+            "enriched_top3": enriched_top3,
+            "preferred_genre": preferred_genre,
+            "selection_logic": selection_logic,
+            "metadata": {
+                "reviews_fetched": reviews_fetched or {},
+                "warning": warning,
+            },
+        }
+        write_debug_file(
+            run_id,
+            "05_sentiment_fallback_answer.txt",
+            "SentimentAgent fallback output\n\n"
+            f"Reason: {warning}\n\n"
+            f"{format_json(output)}\n",
+        )
+        return output
+
+    def run(self, comparison_output: dict[str, Any], run_id: str = "") -> dict[str, Any]:
         top3 = comparison_output.get("top3", [])
         all_movies = comparison_output.get("all_movies", [])
         preferred_genre = comparison_output.get("preferred_genre", "")
@@ -48,33 +125,25 @@ class SentimentAgent(LLMClient):
         logger.info("SentimentAgent started: selected_movies=%d", len(top3))
 
         if not self.client:
-            return {
-                "enriched_top3": [],
-                "preferred_genre": preferred_genre,
-                "selection_logic": selection_logic,
-                "metadata": {
-                    "reviews_fetched": {},
-                    "error": "GEMINI_API_KEY is missing in environment variables.",
-                },
-            }
+            return self._fallback_sentiment(
+                top3=top3,
+                all_movies=all_movies,
+                preferred_genre=preferred_genre,
+                selection_logic=selection_logic,
+                warning="NVIM_API_KEY is missing; fallback sentiment was used.",
+                run_id=run_id,
+            )
 
         title_to_movie = {movie.get("title"): movie for movie in all_movies}
         reviews_by_title: dict[str, list[dict[str, Any]]] = {}
         reviews_fetched: dict[str, int] = {}
         no_review_context: dict[str, dict[str, Any]] = {}
 
-        def _fetch_for_item(item: dict[str, Any]) -> tuple[str, list[dict[str, Any]]]:
-            title = item.get("title", "")
-            movie = title_to_movie.get(title, {})
-            movie_id = movie.get("id")
-            if not movie_id:
-                return title, []
-            return title, self._fetch_reviews(int(movie_id))
-
         try:
-            with ThreadPoolExecutor(max_workers=len(top3) or 1) as executor:
-                fetch_results = list(executor.map(_fetch_for_item, top3))
-            for title, reviews in fetch_results:
+            for item in top3:
+                title = item.get("title", "")
+                movie = title_to_movie.get(title, {})
+                reviews = movie.get("biletinial_comments", [])
                 reviews_by_title[title] = reviews
                 reviews_fetched[title] = len(reviews)
                 if len(reviews) == 0:
@@ -86,12 +155,15 @@ class SentimentAgent(LLMClient):
 
             prompt_payload = {
                 "instruction": (
-                    "Analyze the English user reviews for the 3 movies below. "
+                    "Analyze the user reviews/comments for the 3 movies below. "
+                    "Reviews are from Biletinial and may be in Turkish or English. "
                     "For each movie, set sentiment to positive/mixed/negative, "
                     "Write the recommendation explanation in English with 2-3 sentences, and "
-                    "extract up to 3 short English snippets from reviews. "
+                    "extract up to 3 short snippets from reviews in their original language. "
+                    "Be strict: do not call sentiment positive unless comments clearly support it. "
+                    "Mention meaningful complaints when comments contain them. "
                     "Return only JSON and use only the enriched_top3 key. "
-                    "For movies with no reviews, write the explanation using vote_average and overview."
+                    "For movies with no reviews, write the explanation using local rating and overview."
                 ),
                 "expected_schema": {
                     "enriched_top3": [
@@ -111,58 +183,39 @@ class SentimentAgent(LLMClient):
                         {
                             "author": review.get("author", ""),
                             "content": review.get("content", ""),
+                            "rating": review.get("rating"),
                             "created_at": review.get("created_at", ""),
+                            "venue": review.get("venue", ""),
                         }
                         for review in reviews
                     ]
                     for title, reviews in reviews_by_title.items()
                 },
             }
-
-            response = self.client.models.generate_content(
-                model=self.MODEL_NAME,
-                contents=json.dumps(prompt_payload, ensure_ascii=False),
-                config=types.GenerateContentConfig(
-                    temperature=0.4,
-                    max_output_tokens=2048,
-                    response_mime_type="application/json",
-                    response_schema={
-                        "type": "object",
-                        "properties": {
-                            "enriched_top3": {
-                                "type": "array",
-                                "items": {
-                                    "type": "object",
-                                    "properties": {
-                                        "rank": {"type": "integer"},
-                                        "title": {"type": "string"},
-                                        "sentiment": {"type": "string"},
-                                        "explanation": {"type": "string"},
-                                        "review_snippets": {
-                                            "type": "array",
-                                            "items": {"type": "string"},
-                                        },
-                                    },
-                                    "required": [
-                                        "rank",
-                                        "title",
-                                        "sentiment",
-                                        "explanation",
-                                        "review_snippets",
-                                    ],
-                                },
-                            }
-                        },
-                        "required": ["enriched_top3"],
-                    },
-                ),
+            write_debug_file(
+                run_id,
+                "04_sentiment_prompt.txt",
+                "SentimentAgent prompt payload sent to NVIDIA\n\n"
+                f"Model: {self.MODEL_NAME}\n\n"
+                f"{format_json(prompt_payload)}\n",
             )
-            if isinstance(response.parsed, dict):
-                parsed = response.parsed
-            else:
-                raw_text = response.text or ""
-                cleaned = self._extract_json_object(raw_text)
-                parsed = json.loads(cleaned)
+
+            response = self.client.chat.completions.create(
+                model=self.MODEL_NAME,
+                messages=[{"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)}],
+                temperature=0.4,
+                max_tokens=2048,
+            )
+            raw_text = response.choices[0].message.content or ""
+            write_debug_file(
+                run_id,
+                "05_sentiment_llm_answer.txt",
+                "SentimentAgent raw LLM answer\n\n"
+                f"Model: {self.MODEL_NAME}\n\n"
+                f"{raw_text}\n",
+            )
+            cleaned = self._extract_json_object(raw_text)
+            parsed = json.loads(cleaned)
 
             output = {
                 "enriched_top3": parsed.get("enriched_top3", []),
@@ -187,28 +240,25 @@ class SentimentAgent(LLMClient):
 
             logger.info("SentimentAgent completed: enriched_movies=%d", len(output["enriched_top3"]))
             return output
-        except requests.RequestException as exc:
-            logger.exception("TMDB API request failed in SentimentAgent")
-            return {
-                "enriched_top3": [],
-                "preferred_genre": preferred_genre,
-                "selection_logic": selection_logic,
-                "metadata": {
-                    "reviews_fetched": reviews_fetched,
-                    "error": f"TMDB API request failed: {exc}",
-                },
-            }
         except Exception as exc:
-            logger.exception("SentimentAgent failed")
-            return {
-                "enriched_top3": [],
-                "preferred_genre": preferred_genre,
-                "selection_logic": selection_logic,
-                "metadata": {
-                    "reviews_fetched": reviews_fetched,
-                    "error": f"SentimentAgent failed: {exc}",
-                },
-            }
+            logger.warning("SentimentAgent failed; using fallback sentiment: %s", exc)
+            write_debug_file(
+                run_id,
+                "05_sentiment_error.txt",
+                "SentimentAgent failed before a valid parsed answer was produced.\n\n"
+                f"Error: {exc}\n\n"
+                f"Top 3 from comparison:\n{format_json(top3)}\n\n"
+                f"Reviews fetched:\n{format_json(reviews_fetched)}\n",
+            )
+            return self._fallback_sentiment(
+                top3=top3,
+                all_movies=all_movies,
+                preferred_genre=preferred_genre,
+                selection_logic=selection_logic,
+                reviews_fetched=reviews_fetched,
+                warning=f"SentimentAgent failed; fallback sentiment was used: {exc}",
+                run_id=run_id,
+            )
 
 
 if __name__ == "__main__":

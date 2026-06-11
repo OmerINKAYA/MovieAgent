@@ -1,17 +1,14 @@
-import os
 import re
 
 from dotenv import load_dotenv
-from google import genai
 
 
 class LLMClient:
-    """Shared initialisation and text-parsing utilities for Gemini-backed agents."""
+    """Shared text-parsing utilities for LLM-backed agents."""
 
     def __init__(self) -> None:
         load_dotenv()
-        self.api_key = os.getenv("GEMINI_API_KEY")
-        self.client = genai.Client(api_key=self.api_key) if self.api_key else None
+        self.client = None
 
     @staticmethod
     def _strip_markdown_fences(text: str) -> str:

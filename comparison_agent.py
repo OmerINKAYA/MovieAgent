@@ -1,10 +1,13 @@
 import json
 import logging
+import os
 from typing import Any
 
+from google import genai
 from google.genai import types
 
 from _llm_client import LLMClient
+from debug_logger import format_json, write_debug_file
 
 
 logging.basicConfig(level=logging.INFO)
@@ -12,9 +15,23 @@ logger = logging.getLogger(__name__)
 
 
 class ComparisonAgent(LLMClient):
-    MODEL_NAME = "gemini-3.1-flash-lite"
+    MODEL_NAME = "gemini-3.1-flash-lite-preview"
 
-    def run(self, discovery_output: dict[str, Any], preferred_genre: str) -> dict[str, Any]:
+    def __init__(self) -> None:
+        super().__init__()
+        api_key = os.getenv("GEMINI_API_KEY")
+        self.client = (
+            genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=30_000))
+            if api_key
+            else None
+        )
+
+    def run(
+        self,
+        discovery_output: dict[str, Any],
+        preferred_genre: str,
+        run_id: str = "",
+    ) -> dict[str, Any]:
         movies = discovery_output.get("movies", [])
         logger.info(
             "ComparisonAgent started: preferred_genre=%s input_movies=%d",
@@ -34,19 +51,35 @@ class ComparisonAgent(LLMClient):
         formatted_movies = [
             {
                 "title": movie.get("title", ""),
+                "source": movie.get("source", "tmdb"),
                 "genre_ids": movie.get("genre_ids", []),
+                "genre_names": movie.get("genre_names", []),
                 "vote_average": movie.get("vote_average", 0.0),
+                "vote_count": movie.get("vote_count", 0),
+                "biletinial_rating": movie.get("biletinial_rating", 0.0),
+                "biletinial_comment_count": movie.get("biletinial_comment_count", 0),
                 "release_date": movie.get("release_date", ""),
+                "overview": movie.get("overview", ""),
+                "director": movie.get("director", ""),
+                "duration": movie.get("duration", ""),
+                "detail_url": movie.get("detail_url", ""),
+                "playing_at_summary": {
+                    "cinema_count": len(movie.get("playing_at", [])),
+                    "cinemas": [
+                        venue.get("cinema", "")
+                        for venue in movie.get("playing_at", [])[:5]
+                    ],
+                },
             }
             for movie in movies
         ]
 
         prompt = (
             "Below is a filtered list of currently playing movies in Turkey and the user's preferred genre.\n"
+            "Movies may come from Biletinial, which uses Turkish genre names and local audience ratings/comments.\n"
             "Task:\n"
-            "1) Select the best 3 movies based on genre match and vote_average.\n"
-            "2) At least 2 of the selected 3 films must have a release_date in 2025 or later.\n"
-            "   The third film can be older.\n"
+            "1) Select the best 3 movies based on exact Biletinial genre match first, then local audience rating/comment count.\n"
+            "2) Do not select movies without playing_at venue data. Be strict: a weak genre match is worse than a lower rating.\n"
             "3) Return only JSON.\n"
             "4) 'reason' must be in English and 1-2 sentences.\n"
             "5) 'selection_logic' must be in English and 2-3 sentences.\n"
@@ -63,6 +96,13 @@ class ComparisonAgent(LLMClient):
             f"User preferred genre: {preferred_genre}\n"
             f"Movies JSON: {json.dumps(formatted_movies, ensure_ascii=False)}"
         )
+        write_debug_file(
+            run_id,
+            "02_comparison_prompt.txt",
+            "ComparisonAgent prompt sent to Gemini\n\n"
+            f"Model: {self.MODEL_NAME}\n\n"
+            f"{prompt}\n",
+        )
 
         try:
             response = self.client.models.generate_content(
@@ -74,6 +114,13 @@ class ComparisonAgent(LLMClient):
                 ),
             )
             raw_text = response.text or ""
+            write_debug_file(
+                run_id,
+                "03_comparison_llm_answer.txt",
+                "ComparisonAgent raw LLM answer\n\n"
+                f"Model: {self.MODEL_NAME}\n\n"
+                f"{raw_text}\n",
+            )
             cleaned = self._strip_markdown_fences(raw_text)
             parsed = json.loads(cleaned)
 
@@ -87,6 +134,13 @@ class ComparisonAgent(LLMClient):
             return output
         except Exception as exc:
             logger.exception("ComparisonAgent failed")
+            write_debug_file(
+                run_id,
+                "03_comparison_error.txt",
+                "ComparisonAgent failed before a valid parsed answer was produced.\n\n"
+                f"Error: {exc}\n\n"
+                f"Input movies:\n{format_json(formatted_movies)}\n",
+            )
             return {
                 "top3": [],
                 "selection_logic": "",
