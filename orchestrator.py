@@ -5,7 +5,7 @@ from typing import Any
 
 from comparison_agent import ComparisonAgent
 from debug_logger import format_json, start_run, write_debug_file
-from distance_utils import add_distances_to_playing_at, parse_user_location
+from distance_utils import add_distances_to_playing_at, haversine_km, parse_user_location
 from discovery_agent import DiscoveryAgent
 from evaluation_agent import EvaluationAgent
 from sentiment_agent import SentimentAgent
@@ -46,6 +46,39 @@ def _attach_showtime_context(
             }
         )
     return output
+
+
+def _collect_all_theaters(
+    all_movies: list[dict[str, Any]],
+    user_location: dict[str, float] | None,
+) -> list[dict[str, Any]]:
+    """Flatten every now-playing movie's venues into a deduped list of theaters
+    that have coordinates, attaching distance from the user when known."""
+    seen: set[tuple[float, float]] = set()
+    theaters: list[dict[str, Any]] = []
+    for movie in all_movies:
+        for venue in movie.get("playing_at", []):
+            lat = venue.get("lat")
+            lon = venue.get("lon")
+            if not isinstance(lat, (int, float)) or not isinstance(lon, (int, float)):
+                continue
+            key = (round(float(lat), 5), round(float(lon), 5))
+            if key in seen:
+                continue
+            seen.add(key)
+            theater = {
+                "cinema": str(venue.get("cinema", "") or "Cinema"),
+                "address": str(venue.get("address", "") or ""),
+                "lat": float(lat),
+                "lon": float(lon),
+            }
+            if user_location:
+                theater["distance_km"] = round(
+                    haversine_km(user_location["lat"], user_location["lon"], float(lat), float(lon)),
+                    2,
+                )
+            theaters.append(theater)
+    return theaters
 
 
 def run(preferred_genre: str, user_location: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -104,6 +137,9 @@ def run(preferred_genre: str, user_location: dict[str, Any] | None = None) -> di
     logger.info("Orchestrator completed")
     return {
         "enriched_top3": enriched_top3,
+        "all_theaters": _collect_all_theaters(
+            comparison_output.get("all_movies", []), parsed_user_location
+        ),
         "preferred_genre": sentiment_output.get("preferred_genre", preferred_genre),
         "selection_logic": sentiment_output.get("selection_logic", ""),
         "reviews_fetched": sentiment_output.get("metadata", {}).get("reviews_fetched", {}),

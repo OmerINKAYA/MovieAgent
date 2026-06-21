@@ -17,6 +17,8 @@ const els = {
 let pickerMap = null;
 let pickerMarker = null;
 let selectedLocation = null;
+let filmMaps = [];
+const state = { allTheaters: [], locationUsed: false };
 
 // --------------------------------------------------------------------------- //
 // Tile layer helper (shared by picker + result maps)
@@ -108,6 +110,7 @@ async function findMovies() {
 
   els.findBtn.disabled = true;
   els.findBtn.classList.add("is-loading");
+  resetFilmMaps();
   els.results.innerHTML = "";
   showLoading();
 
@@ -151,6 +154,9 @@ function renderResults(data) {
     showMessage("No movie results available.", "warn");
     return;
   }
+
+  state.allTheaters = data.all_theaters || [];
+  state.locationUsed = !!data.location_used;
 
   for (const movie of data.movies) {
     els.results.appendChild(buildCard(movie));
@@ -249,6 +255,38 @@ function buildDetails(details, movie) {
     more.textContent = `Showing the ${shown.length} closest of ${total} cinemas.`;
     venuesEl.appendChild(more);
   }
+
+  // "Where it's playing" map for this film, at the bottom of its dropdown.
+  const filmTheaters = movie.theaters || [];
+  if (filmTheaters.length) {
+    details.appendChild(buildFilmMap(filmTheaters));
+  }
+}
+
+function buildFilmMap(filmTheaters) {
+  const section = document.createElement("div");
+  section.className = "filmmap";
+  section.innerHTML = `
+    <div class="filmmap__head">
+      <span class="filmmap__title">Where it's playing</span>
+      <div class="filmmap__legend">
+        <span class="legend"><i class="legend__dot legend__dot--me"></i>You</span>
+        <span class="legend"><i class="legend__dot legend__dot--rec"></i>Playing here</span>
+        <span class="legend"><i class="legend__dot legend__dot--other"></i>Other theaters</span>
+      </div>
+    </div>
+    <div class="filmmap__map"></div>`;
+  const mapEl = section.querySelector(".filmmap__map");
+
+  const userLoc = state.locationUsed && selectedLocation ? selectedLocation : null;
+  const filmKeys = new Set(filmTheaters.map((t) => `${t.lat.toFixed(5)},${t.lon.toFixed(5)}`));
+  const others = state.allTheaters.filter(
+    (t) => !filmKeys.has(`${t.lat.toFixed(5)},${t.lon.toFixed(5)}`)
+  );
+
+  // Defer map creation until the container is laid out inside the open dropdown.
+  setTimeout(() => renderTheaterMap(mapEl, filmTheaters, others, userLoc), 0);
+  return section;
 }
 
 function buildVenue(venue) {
@@ -305,33 +343,60 @@ function buildVenue(venue) {
     wrap.appendChild(list);
   }
 
-  // Embedded location map (or a link fallback when coordinates are missing)
-  if (venue.lat != null && venue.lon != null) {
-    const mapEl = document.createElement("div");
-    mapEl.className = "venue__map";
-    wrap.appendChild(mapEl);
-    renderVenueMap(mapEl, venue);
-  }
-
   const link = document.createElement("a");
   link.className = "venue__link";
   link.href = venue.map_link;
   link.target = "_blank";
   link.rel = "noopener";
-  link.textContent = "Open in OpenStreetMap ↗";
+  link.textContent = "Open in Google Maps ↗";
   wrap.appendChild(link);
 
   return wrap;
 }
 
-function renderVenueMap(el, venue) {
-  const map = L.map(el, { scrollWheelZoom: false }).setView([venue.lat, venue.lon], 15);
+// --------------------------------------------------------------------------- //
+// Per-film "Where they're playing" maps
+// --------------------------------------------------------------------------- //
+function resetFilmMaps() {
+  for (const map of filmMaps) map.remove();
+  filmMaps = [];
+}
+
+function renderTheaterMap(el, playingHere, others, userLoc) {
+  const map = L.map(el, { scrollWheelZoom: false }).setView(ISTANBUL, 11);
   tileLayer().addTo(map);
-  const dist =
-    typeof venue.distance_km === "number" ? `<br>${venue.distance_km.toFixed(2)} km away` : "";
-  L.marker([venue.lat, venue.lon])
-    .addTo(map)
-    .bindPopup(`<strong>${escapeHtml(venue.cinema)}</strong><br>${escapeHtml(venue.address || "")}${dist}`);
+  filmMaps.push(map);
+  const bounds = [];
+
+  const addDot = (t, opts, label) => {
+    const dist = typeof t.distance_km === "number" ? `<br>${t.distance_km.toFixed(2)} km away` : "";
+    L.circleMarker([t.lat, t.lon], opts)
+      .addTo(map)
+      .bindPopup(`<strong>${escapeHtml(label || t.cinema)}</strong>${dist}`);
+    bounds.push([t.lat, t.lon]);
+  };
+
+  // Other theaters underneath (gray), then this film's theaters (green), user pin on top (blue).
+  for (const t of others) {
+    addDot(t, { radius: 5, color: "#6b7280", fillColor: "#9ca3af", fillOpacity: 0.85, weight: 1 });
+  }
+  for (const t of playingHere) {
+    addDot(t, { radius: 8, color: "#16a34a", fillColor: "#22c55e", fillOpacity: 0.95, weight: 2 });
+  }
+  if (userLoc) {
+    addDot(
+      { lat: userLoc.lat, lon: userLoc.lon },
+      { radius: 9, color: "#ffffff", fillColor: "#3b82f6", fillOpacity: 1, weight: 3 },
+      "Your location"
+    );
+  }
+
+  // Frame this film's theaters (plus the user) rather than the whole city.
+  const focus = playingHere.map((t) => [t.lat, t.lon]);
+  if (userLoc) focus.push([userLoc.lat, userLoc.lon]);
+  const frame = focus.length ? focus : bounds;
+  if (frame.length > 1) map.fitBounds(frame, { padding: [30, 30] });
+  else if (frame.length === 1) map.setView(frame[0], 13);
   setTimeout(() => map.invalidateSize(), 60);
 }
 

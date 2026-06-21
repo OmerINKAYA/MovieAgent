@@ -78,10 +78,11 @@ def _normalize_score(score: Any) -> int | None:
 
 
 def _map_link(venue: dict[str, Any]) -> str:
+    """Google Maps link for a venue — by coordinates when available, else a text search."""
     lat = venue.get("lat")
     lon = venue.get("lon")
     if isinstance(lat, (int, float)) and isinstance(lon, (int, float)):
-        return f"https://www.openstreetmap.org/?mlat={lat}&mlon={lon}#map=16/{lat}/{lon}"
+        return f"https://www.google.com/maps/search/?api=1&query={lat},{lon}"
 
     query = quote_plus(
         " ".join(
@@ -90,7 +91,7 @@ def _map_link(venue: dict[str, Any]) -> str:
             if part
         )
     )
-    return f"https://www.openstreetmap.org/search?query={query}"
+    return f"https://www.google.com/maps/search/?api=1&query={query}"
 
 
 def _unique_mappable_venues(venues: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -130,6 +131,25 @@ def _top_venues(venues: list[dict[str, Any]], limit: int = 3) -> list[dict[str, 
             else float("inf")
         )
     return unique[:limit]
+
+
+def _slim_theater(venue: dict[str, Any]) -> dict[str, Any]:
+    """Minimal theater entry for map pins."""
+    return {
+        "cinema": str(venue.get("cinema", "") or "Cinema"),
+        "lat": float(venue["lat"]),
+        "lon": float(venue["lon"]),
+        "distance_km": float(venue["distance_km"]) if isinstance(venue.get("distance_km"), (int, float)) else None,
+    }
+
+
+def _mappable_theaters(venues: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Unique theaters from a venue list that have coordinates, as slim pins."""
+    return [
+        _slim_theater(v)
+        for v in _unique_mappable_venues(venues)
+        if isinstance(v.get("lat"), (int, float)) and isinstance(v.get("lon"), (int, float))
+    ]
 
 
 def _shape_venue(venue: dict[str, Any]) -> dict[str, Any]:
@@ -176,6 +196,7 @@ def _shape_result(result: dict[str, Any], location_warning: str = "") -> dict[st
                     for v in _closest_venues(venues)
                 ],
                 "venues": [_shape_venue(v) for v in _top_venues(venues, limit=3)],
+                "theaters": _mappable_theaters(venues),
                 "total_venues": len(_unique_mappable_venues(venues)),
             }
         )
@@ -190,6 +211,7 @@ def _shape_result(result: dict[str, Any], location_warning: str = "") -> dict[st
         "location_used": bool(location_meta.get("used")),
         "location_warning": location_warning,
         "movies": movies,
+        "all_theaters": [_slim_theater(t) for t in result.get("all_theaters", [])],
     }
 
 

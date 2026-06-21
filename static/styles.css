@@ -411,15 +411,7 @@ body {
 .card__expand-chevron { width: 18px; height: 18px; transition: transform 0.25s; }
 .card__expand[aria-expanded="true"] .card__expand-chevron { transform: rotate(180deg); }
 
-.card__details { padding: 0 18px 18px; }
-.card__map {
-  height: 260px;
-  margin: 16px 0;
-  border-radius: var(--radius-sm);
-  overflow: hidden;
-  border: 1px solid var(--border-strong);
-}
-.card__map:empty { display: none; }
+.card__details { padding: 16px 18px 18px; }
 
 /* Venue list */
 .venues { display: grid; gap: 10px; }
@@ -459,13 +451,6 @@ body {
   border: 1px solid var(--border);
   color: var(--text);
 }
-.venue__map {
-  height: 180px;
-  margin-top: 12px;
-  border-radius: 10px;
-  overflow: hidden;
-  border: 1px solid var(--border-strong);
-}
 .venue__link {
   display: inline-block;
   margin-top: 10px;
@@ -498,6 +483,42 @@ body {
 .summary__fill { height: 100%; border-radius: 999px; background: var(--grad); transition: width 0.8s ease; }
 .summary__score { font-weight: 700; font-variant-numeric: tabular-nums; }
 .summary__feedback { color: var(--text-dim); font-size: 0.95rem; margin: 0; }
+
+/* ---------------- Per-film "where it's playing" map ---------------- */
+.filmmap { margin-top: 18px; }
+.filmmap__head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 14px;
+  flex-wrap: wrap;
+  margin-bottom: 10px;
+}
+.filmmap__title { font-weight: 700; font-size: 0.98rem; }
+.filmmap__legend { display: flex; gap: 14px; flex-wrap: wrap; }
+.filmmap__map {
+  height: 300px;
+  border-radius: var(--radius-sm);
+  overflow: hidden;
+  border: 1px solid var(--border-strong);
+}
+.legend {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 0.84rem;
+  color: var(--text-dim);
+}
+.legend__dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  flex: none;
+  box-shadow: 0 0 0 1px rgba(0, 0, 0, 0.25) inset;
+}
+.legend__dot--me { background: #3b82f6; box-shadow: 0 0 0 2px #fff inset; }
+.legend__dot--rec { background: #22c55e; }
+.legend__dot--other { background: #9ca3af; }
 
 .footer {
   margin-top: 32px;
