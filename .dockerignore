@@ -1,0 +1,13 @@
+.git
+.gitignore
+.dockerignore
+venv/
+__pycache__/
+*.pyc
+.env
+.env.example
+llm_logs/
+cache/
+.claude/
+*.pdf
+README.md
