@@ -12,8 +12,12 @@ A multi-agent app that recommends movies currently playing in cinemas in İstanb
 
 ```
 Browser (static SPA) → FastAPI (server.py) → orchestrator.run()
-        └─ Discovery → Comparison → Sentiment → Evaluation ─┘
+        └─ Discovery → Comparison → Sentiment → Evaluation ─┐
+              ▲  re-select without the weak films           │
+              └──────── score < threshold ◄────────────────┘
 ```
+
+All LLM reasoning runs on **Google Gemini** (`gemini-3.1-flash-lite-preview`).
 
 ## Frontend
 
@@ -41,10 +45,20 @@ The orchestrator (`orchestrator.py`) runs the agents in order, times each stage,
 |---|---|---|---|
 | Discovery | `discovery_agent.py` | Runs the Biletinial scraper, keeps only films that have showtime (`playing_at`) data | No |
 | Comparison | `comparison_agent.py` | Picks the best 3 films by genre match first, then audience rating / comment count | Google Gemini (`gemini-3.1-flash-lite-preview`) |
-| Sentiment | `sentiment_agent.py` | Reads each film's Biletinial comments, assigns sentiment (positive / mixed / negative) and writes the English explanation | NVIDIA NIM (`meta/llama-3.3-70b-instruct`) |
-| Evaluation | `evaluation_agent.py` | Audits the whole decision chain and returns an overall score plus per-film scores and feedback | NVIDIA NIM (`nvidia/llama-3.3-nemotron-super-49b-v1`) |
+| Sentiment | `sentiment_agent.py` | Reads each film's Biletinial comments, assigns sentiment (positive / mixed / negative) and writes the English explanation | Google Gemini (`gemini-3.1-flash-lite-preview`) |
+| Evaluation | `evaluation_agent.py` | Audits the whole decision chain and returns an overall score plus per-film scores and feedback | Google Gemini (`gemini-3.1-flash-lite-preview`) |
 
-`_llm_client.py` holds shared JSON/markdown-parsing helpers used by the LLM agents.
+`_llm_client.py` builds the shared Gemini client (60 s timeout, automatic retries) and holds the JSON/markdown-parsing helpers used by every LLM agent.
+
+## Autonomous decision loop
+
+The orchestrator doesn't just run the agents once — it **decides whether the result is good enough**. After the Evaluation agent scores a selection (0–10), the orchestrator:
+
+1. **Accepts** the picks if the overall score is at/above the threshold (`SCORE_ACCEPT_THRESHOLD = 7.0`).
+2. Otherwise **drops the films that scored below the bar** and asks the Comparison agent for a different set, excluding everything already rejected.
+3. Repeats up to `MAX_SELECTION_ATTEMPTS = 3` times, then keeps the **best-scoring attempt**.
+
+Each run's decisions are recorded in `llm_logs/<run>/08_decision_loop.txt` and in the API response under `metadata.decision_loop`. This is the project's required autonomous decision loop and its LLM-in-the-loop evaluation framework: the Evaluation agent judges whether the first system succeeded, and the orchestrator acts on that judgement.
 
 ## Data source
 
@@ -59,11 +73,11 @@ Because this is HTML scraping, the parsing regexes can break if Biletinial chang
 
 ## Resilience / fallbacks
 
-The app degrades gracefully when an LLM key is missing or an API call fails:
+Every LLM agent uses the same `GEMINI_API_KEY` and the shared client retries failed calls before giving up. If the key is missing or all retries fail, the app still degrades gracefully:
 
-- **Comparison** needs `GEMINI_API_KEY`. Without it the stage reports an error and returns no top 3.
-- **Sentiment** falls back to a rule-based sentiment derived from the audience score when `NVIM_API_KEY` is missing or the call fails.
-- **Evaluation** falls back to a rule-based scoring formula (genre match, audience score, sentiment, comment confidence) when the key is missing or the response can't be parsed.
+- **Comparison** reports an error and returns no top 3 when the key is missing.
+- **Sentiment** falls back to a rule-based sentiment derived from the audience score.
+- **Evaluation** falls back to a rule-based scoring formula (genre match, audience score, sentiment, comment confidence) when the response can't be parsed.
 
 ## Location feature
 
@@ -74,8 +88,7 @@ The UI includes an optional Leaflet/OpenStreetMap picker. When "Search with my l
 Read from the environment (or a local `.env`, loaded with `python-dotenv`):
 
 ```
-GEMINI_API_KEY  — Google Gemini key, required by the Comparison agent
-NVIM_API_KEY    — NVIDIA NIM key, used by the Sentiment and Evaluation agents (optional; falls back if absent)
+GEMINI_API_KEY  — Google Gemini key, used by the Comparison, Sentiment, and Evaluation agents
 ```
 
 Optional:
@@ -86,15 +99,14 @@ MOVIE_AGENT_DEBUG_LOG_DIR  — directory for per-run debug logs (defaults to ./l
 
 ## HuggingFace Spaces setup
 
-This is configured as a **Docker** Space (the front matter sets `sdk: docker` and `app_port: 7860`). A Docker Space requires a `Dockerfile` at the repo root that installs `requirements.txt` and starts the server on port 7860, e.g. `uvicorn server:app --host 0.0.0.0 --port 7860`. Add `GEMINI_API_KEY` and `NVIM_API_KEY` under **Settings → Variables and secrets** (never commit `.env`).
+This is configured as a **Docker** Space (the front matter sets `sdk: docker` and `app_port: 7860`). A Docker Space requires a `Dockerfile` at the repo root that installs `requirements.txt` and starts the server on port 7860, e.g. `uvicorn server:app --host 0.0.0.0 --port 7860`. Add `GEMINI_API_KEY` under **Settings → Variables and secrets** (never commit `.env`).
 
 ## Dependencies
 
 ```
 fastapi            # web backend
 uvicorn[standard]  # ASGI server
-google-genai       # Gemini SDK (Comparison agent)
-openai             # OpenAI-compatible client for NVIDIA NIM (Sentiment / Evaluation agents)
+google-genai       # Gemini SDK (Comparison / Sentiment / Evaluation agents)
 requests           # Biletinial scraping
 python-dotenv      # loads .env
 ```

@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-A multi-agent AI pipeline that recommends currently playing movies in Turkey based on the user's genre preference. The user selects a genre, and the system fetches real-time data from TMDB, analyzes it through a chain of 4 agents, and returns top 3 recommendations with Turkish explanations and a quality evaluation score.
+A multi-agent AI pipeline that recommends currently playing movies in İstanbul cinemas based on the user's genre preference. The user selects a genre, and the system scrapes real-time data from Biletinial, analyzes it through a chain of 4 agents inside an autonomous decision loop, and returns the top 3 recommendations with English explanations and a quality evaluation score.
 
 ---
 
@@ -11,21 +11,18 @@ A multi-agent AI pipeline that recommends currently playing movies in Turkey bas
 | Layer | Technology |
 |---|---|
 | Language | Python 3.10+ |
-| LLM (Comparison) | Google Gemini via `google-genai` SDK |
-| LLM (Sentiment, Evaluation) | NVIDIA NIM via `openai` SDK |
-| Movie Data | TMDB API (free tier) |
-| Framework | LangChain (orchestration) |
-| UI | Gradio |
-| Deploy | HuggingFace Spaces |
+| LLM (all agents) | Google Gemini (`gemini-3.1-flash-lite-preview`) via `google-genai` SDK |
+| Movie Data | Biletinial İstanbul listings (HTML scraping, `biletinial_scraper.py`) |
+| Orchestration | Plain Python orchestrator with an autonomous decision loop (`orchestrator.py`) |
+| UI | Custom HTML/CSS/JS served by FastAPI (`server.py`, `static/`) |
+| Deploy | HuggingFace Spaces (Docker) |
 
 ---
 
 ## Environment Variables
 
 ```
-TMDB_API_KEY    — TMDB API key
-GEMINI_API_KEY  — Google Gemini API key (used by ComparisonAgent)
-NVIM_API_KEY    — NVIDIA NIM API key (used by SentimentAgent and EvaluationAgent)
+GEMINI_API_KEY  — Google Gemini API key (used by Comparison, Sentiment, and Evaluation agents)
 ```
 
 Always read API keys from environment variables. Never hardcode them.
@@ -89,7 +86,7 @@ Always read API keys from environment variables. Never hardcode them.
 ---
 
 ### Agent 3 — Sentiment & Explanation Agent (`sentiment_agent.py`)
-- **LLM:** Yes (1 call) — `meta/llama-3.3-70b-instruct`
+- **LLM:** Yes (1 call) — `gemini-3.1-flash-lite-preview`
 - **Input:** Comparison Agent output dict
 - **What it does:** For each of the 3 selected films, fetches up to 5 English reviews from TMDB `/movie/{movie_id}/reviews`. Sends all reviews to the LLM in a single call. LLM analyzes sentiment and generates a Turkish recommendation explanation per film.
 - **LLM config:** `temperature=0.4`, `max_output_tokens=2048`
@@ -116,7 +113,7 @@ Always read API keys from environment variables. Never hardcode them.
 ---
 
 ### Agent 4 — Evaluation Agent (`evaluation_agent.py`)
-- **LLM:** Yes (1 call) — `nvidia/llama-3.3-nemotron-super-49b-v1`
+- **LLM:** Yes (1 call) — `gemini-3.1-flash-lite-preview`
 - **Input:** Sentiment Agent output dict + Comparison Agent output dict
 - **What it does:** Audits the entire decision chain. Evaluates genre relevance, explanation quality, and sentiment consistency. Produces a quality score and feedback.
 - **LLM config:** `temperature=0.2`, `max_output_tokens=1024`
@@ -143,20 +140,32 @@ Always read API keys from environment variables. Never hardcode them.
 User (preferred_genre)
         │
         ▼
-DiscoveryAgent.run()
+DiscoveryAgent.run()                         (once)
         │  {"movies": [...], "metadata": {...}}
         ▼
-ComparisonAgent.run(discovery_output, preferred_genre)
-        │  {"top3": [...], "all_movies": [...]}
+┌─────────── decision loop (≤ MAX_SELECTION_ATTEMPTS) ───────────┐
+│ ComparisonAgent.run(discovery, genre, exclude_titles, attempt) │
+│        │  {"top3": [...], "all_movies": [...]}                 │
+│        ▼                                                       │
+│ SentimentAgent.run(comparison_output, attempt)                 │
+│        │  {"enriched_top3": [...]}                             │
+│        ▼                                                       │
+│ EvaluationAgent.run(sentiment, comparison, attempt)            │
+│        │  {"overall_score": ..., "per_film_scores": [...]}     │
+│        ▼                                                       │
+│ overall_score ≥ SCORE_ACCEPT_THRESHOLD ?                       │
+│   yes → accept and exit loop                                   │
+│   no  → exclude the weak films, retry with a new selection     │
+└────────────────────────────────────────────────────────────────┘
+        │  (best-scoring attempt is kept)
         ▼
-SentimentAgent.run(comparison_output)
-        │  {"enriched_top3": [...]}
-        ▼
-EvaluationAgent.run(sentiment_output, comparison_output)
-        │  {"overall_score": ..., "pipeline_feedback": ...}
-        ▼
-Orchestrator → Gradio UI
+Orchestrator → FastAPI JSON → custom web UI
 ```
+
+The orchestrator owns the autonomous decision: it reads the Evaluation agent's
+score and decides whether to accept the picks or drop the weak films and ask
+Comparison for a different set. See `08_decision_loop.txt` per run and
+`metadata.decision_loop` in the API response.
 
 ---
 
@@ -165,12 +174,15 @@ Orchestrator → Gradio UI
 ```
 project/
 ├── agents.md               ← this file
+├── _llm_client.py          ← shared Gemini client + parsing helpers
+├── biletinial_scraper.py   ← Biletinial scraping (the data tool)
 ├── discovery_agent.py
 ├── comparison_agent.py
 ├── sentiment_agent.py
 ├── evaluation_agent.py
-├── orchestrator.py
-├── app.py                  ← Gradio UI
+├── orchestrator.py         ← runs the agents + autonomous decision loop
+├── server.py               ← FastAPI backend
+├── static/                 ← custom HTML/CSS/JS UI
 └── requirements.txt
 ```
 
@@ -183,6 +195,6 @@ project/
 - LLM responses must always be JSON — strip markdown fences before parsing
 - Log agent start, input size, and output summary using Python `logging` (INFO level)
 - Never raise unhandled exceptions — catch API errors and return meaningful messages
-- Each agent initializes its own LLM client in `__init__`; `LLMClient` base class only provides `load_dotenv()` and static JSON-parsing helpers
-- ComparisonAgent uses `google-genai`: `from google import genai` / `genai.Client(api_key=...)` / `client.models.generate_content(...)`
-- SentimentAgent and EvaluationAgent use `openai` pointing at NVIDIA NIM: `OpenAI(base_url="https://integrate.api.nvidia.com/v1", api_key=...)` / `client.chat.completions.create(...)`
+- The `LLMClient` base class builds the shared Gemini client from `GEMINI_API_KEY` and exposes `_gemini_generate(...)` (60 s timeout, automatic retries) plus the static JSON-parsing helpers. Agents do not create their own clients.
+- Every LLM agent calls `self._gemini_generate(prompt, model=self.MODEL_NAME, ...)` and parses the JSON from the returned text.
+- When an LLM call ultimately fails, agents fall back to rule-based behavior instead of raising.

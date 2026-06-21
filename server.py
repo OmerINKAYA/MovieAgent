@@ -38,17 +38,22 @@ GENRE_CHOICES = [
     ("Animation", "Animasyon"),
     ("Family", "Aile"),
     ("Documentary", "Belgesel"),
+    ("Biography", "Biyografi"),
     ("Science Fiction", "Bilim Kurgu"),
     ("Drama", "Dram"),
     ("Fantasy", "Fantastik"),
     ("Thriller", "Gerilim"),
+    ("Mystery", "Gizem"),
     ("Comedy", "Komedi"),
     ("Horror", "Korku"),
     ("Adventure", "Macera"),
+    ("Music", "Müzik"),
+    ("Musical", "Müzikal"),
+    ("Detective", "Polisiye"),
     ("Romance", "Romantik"),
     ("War", "Savaş"),
     ("Crime", "Suç"),
-    ("History", "Tarih"),
+    ("History", "Tarihi"),
 ]
 
 
@@ -245,7 +250,7 @@ def recommend(req: RecommendRequest) -> dict[str, Any]:
     metadata = result.get("metadata", {})
     stage_errors = [
         f"{stage}: {metadata.get(stage, {}).get('error')}"
-        for stage in ("discovery", "sentiment", "evaluation")
+        for stage in ("discovery", "comparison", "sentiment", "evaluation")
         if metadata.get(stage, {}).get("error")
     ]
     if stage_errors:

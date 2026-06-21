@@ -1,9 +1,6 @@
 import json
 import logging
-import os
 from typing import Any
-
-from openai import OpenAI
 
 from _llm_client import LLMClient
 from debug_logger import format_json, write_debug_file
@@ -14,22 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class SentimentAgent(LLMClient):
-    MODEL_NAME = "meta/llama-3.3-70b-instruct"
-    LLM_TIMEOUT_SECONDS = 20.0
-
-    def __init__(self) -> None:
-        super().__init__()
-        api_key = os.getenv("NVIM_API_KEY")
-        self.client = (
-            OpenAI(
-                base_url="https://integrate.api.nvidia.com/v1",
-                api_key=api_key,
-                timeout=self.LLM_TIMEOUT_SECONDS,
-                max_retries=0,
-            )
-            if api_key
-            else None
-        )
+    MODEL_NAME = "gemini-3.1-flash-lite-preview"
 
     @staticmethod
     def _sentiment_from_vote_average(vote_average: float) -> str:
@@ -54,6 +36,7 @@ class SentimentAgent(LLMClient):
         reviews_fetched: dict[str, int] | None = None,
         warning: str = "fallback_sentiment_used",
         run_id: str = "",
+        attempt: int = 1,
     ) -> dict[str, Any]:
         movie_by_title = {movie.get("title", ""): movie for movie in all_movies}
         enriched_top3 = []
@@ -109,20 +92,26 @@ class SentimentAgent(LLMClient):
         }
         write_debug_file(
             run_id,
-            "05_sentiment_fallback_answer.txt",
+            f"05_sentiment_fallback_answer{self._attempt_suffix(attempt)}.txt",
             "SentimentAgent fallback output\n\n"
             f"Reason: {warning}\n\n"
             f"{format_json(output)}\n",
         )
         return output
 
-    def run(self, comparison_output: dict[str, Any], run_id: str = "") -> dict[str, Any]:
+    def run(
+        self,
+        comparison_output: dict[str, Any],
+        run_id: str = "",
+        attempt: int = 1,
+    ) -> dict[str, Any]:
         top3 = comparison_output.get("top3", [])
         all_movies = comparison_output.get("all_movies", [])
         preferred_genre = comparison_output.get("preferred_genre", "")
         selection_logic = comparison_output.get("selection_logic", "")
+        suffix = self._attempt_suffix(attempt)
 
-        logger.info("SentimentAgent started: selected_movies=%d", len(top3))
+        logger.info("SentimentAgent started: selected_movies=%d attempt=%d", len(top3), attempt)
 
         if not self.client:
             return self._fallback_sentiment(
@@ -130,8 +119,9 @@ class SentimentAgent(LLMClient):
                 all_movies=all_movies,
                 preferred_genre=preferred_genre,
                 selection_logic=selection_logic,
-                warning="NVIM_API_KEY is missing; fallback sentiment was used.",
+                warning="GEMINI_API_KEY is missing; fallback sentiment was used.",
                 run_id=run_id,
+                attempt=attempt,
             )
 
         title_to_movie = {movie.get("title"): movie for movie in all_movies}
@@ -194,22 +184,21 @@ class SentimentAgent(LLMClient):
             }
             write_debug_file(
                 run_id,
-                "04_sentiment_prompt.txt",
-                "SentimentAgent prompt payload sent to NVIDIA\n\n"
+                f"04_sentiment_prompt{suffix}.txt",
+                "SentimentAgent prompt payload sent to Gemini\n\n"
                 f"Model: {self.MODEL_NAME}\n\n"
                 f"{format_json(prompt_payload)}\n",
             )
 
-            response = self.client.chat.completions.create(
+            raw_text = self._gemini_generate(
+                json.dumps(prompt_payload, ensure_ascii=False),
                 model=self.MODEL_NAME,
-                messages=[{"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)}],
                 temperature=0.4,
-                max_tokens=2048,
+                max_output_tokens=2048,
             )
-            raw_text = response.choices[0].message.content or ""
             write_debug_file(
                 run_id,
-                "05_sentiment_llm_answer.txt",
+                f"05_sentiment_llm_answer{suffix}.txt",
                 "SentimentAgent raw LLM answer\n\n"
                 f"Model: {self.MODEL_NAME}\n\n"
                 f"{raw_text}\n",
@@ -244,7 +233,7 @@ class SentimentAgent(LLMClient):
             logger.warning("SentimentAgent failed; using fallback sentiment: %s", exc)
             write_debug_file(
                 run_id,
-                "05_sentiment_error.txt",
+                f"05_sentiment_error{suffix}.txt",
                 "SentimentAgent failed before a valid parsed answer was produced.\n\n"
                 f"Error: {exc}\n\n"
                 f"Top 3 from comparison:\n{format_json(top3)}\n\n"
@@ -258,6 +247,7 @@ class SentimentAgent(LLMClient):
                 reviews_fetched=reviews_fetched,
                 warning=f"SentimentAgent failed; fallback sentiment was used: {exc}",
                 run_id=run_id,
+                attempt=attempt,
             )
 
 

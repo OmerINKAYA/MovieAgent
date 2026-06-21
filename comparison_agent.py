@@ -1,10 +1,6 @@
 import json
 import logging
-import os
 from typing import Any
-
-from google import genai
-from google.genai import types
 
 from _llm_client import LLMClient
 from debug_logger import format_json, write_debug_file
@@ -17,26 +13,28 @@ logger = logging.getLogger(__name__)
 class ComparisonAgent(LLMClient):
     MODEL_NAME = "gemini-3.1-flash-lite-preview"
 
-    def __init__(self) -> None:
-        super().__init__()
-        api_key = os.getenv("GEMINI_API_KEY")
-        self.client = (
-            genai.Client(api_key=api_key, http_options=types.HttpOptions(timeout=30_000))
-            if api_key
-            else None
-        )
-
     def run(
         self,
         discovery_output: dict[str, Any],
         preferred_genre: str,
         run_id: str = "",
+        exclude_titles: set[str] | None = None,
+        attempt: int = 1,
     ) -> dict[str, Any]:
-        movies = discovery_output.get("movies", [])
+        all_input_movies = discovery_output.get("movies", [])
+        excluded = {str(title) for title in (exclude_titles or set())}
+        # The orchestrator's decision loop re-runs this agent with the films it
+        # already rejected, so they must be dropped from the candidate pool.
+        candidate_movies = [
+            movie for movie in all_input_movies if movie.get("title", "") not in excluded
+        ]
+        suffix = self._attempt_suffix(attempt)
         logger.info(
-            "ComparisonAgent started: preferred_genre=%s input_movies=%d",
+            "ComparisonAgent started: preferred_genre=%s candidates=%d excluded=%d attempt=%d",
             preferred_genre,
-            len(movies),
+            len(candidate_movies),
+            len(excluded),
+            attempt,
         )
 
         if not self.client:
@@ -44,7 +42,7 @@ class ComparisonAgent(LLMClient):
                 "top3": [],
                 "selection_logic": "",
                 "preferred_genre": preferred_genre,
-                "all_movies": movies,
+                "all_movies": all_input_movies,
                 "metadata": {"error": "GEMINI_API_KEY is missing in environment variables."},
             }
 
@@ -71,12 +69,21 @@ class ComparisonAgent(LLMClient):
                     ],
                 },
             }
-            for movie in movies
+            for movie in candidate_movies
         ]
+
+        retry_note = ""
+        if excluded:
+            retry_note = (
+                "\nThis is a re-selection: the following films were already tried and rejected "
+                "by the evaluation step, so do NOT pick them again: "
+                f"{json.dumps(sorted(excluded), ensure_ascii=False)}.\n"
+            )
 
         prompt = (
             "Below is a filtered list of currently playing movies in Turkey and the user's preferred genre.\n"
             "Movies may come from Biletinial, which uses Turkish genre names and local audience ratings/comments.\n"
+            f"{retry_note}"
             "Task:\n"
             "1) Select the best 3 movies based on exact Biletinial genre match first, then local audience rating/comment count.\n"
             "2) Do not select movies without playing_at venue data. Be strict: a weak genre match is worse than a lower rating.\n"
@@ -98,25 +105,24 @@ class ComparisonAgent(LLMClient):
         )
         write_debug_file(
             run_id,
-            "02_comparison_prompt.txt",
+            f"02_comparison_prompt{suffix}.txt",
             "ComparisonAgent prompt sent to Gemini\n\n"
             f"Model: {self.MODEL_NAME}\n\n"
+            f"Attempt: {attempt}\n"
+            f"Excluded titles: {sorted(excluded)}\n\n"
             f"{prompt}\n",
         )
 
         try:
-            response = self.client.models.generate_content(
+            raw_text = self._gemini_generate(
+                prompt,
                 model=self.MODEL_NAME,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    temperature=0.3,
-                    max_output_tokens=2048,
-                ),
+                temperature=0.3,
+                max_output_tokens=2048,
             )
-            raw_text = response.text or ""
             write_debug_file(
                 run_id,
-                "03_comparison_llm_answer.txt",
+                f"03_comparison_llm_answer{suffix}.txt",
                 "ComparisonAgent raw LLM answer\n\n"
                 f"Model: {self.MODEL_NAME}\n\n"
                 f"{raw_text}\n",
@@ -128,7 +134,7 @@ class ComparisonAgent(LLMClient):
                 "top3": parsed.get("top3", []),
                 "selection_logic": parsed.get("selection_logic", ""),
                 "preferred_genre": preferred_genre,
-                "all_movies": movies,
+                "all_movies": all_input_movies,
             }
             logger.info("ComparisonAgent completed: selected=%d", len(output["top3"]))
             return output
@@ -136,7 +142,7 @@ class ComparisonAgent(LLMClient):
             logger.exception("ComparisonAgent failed")
             write_debug_file(
                 run_id,
-                "03_comparison_error.txt",
+                f"03_comparison_error{suffix}.txt",
                 "ComparisonAgent failed before a valid parsed answer was produced.\n\n"
                 f"Error: {exc}\n\n"
                 f"Input movies:\n{format_json(formatted_movies)}\n",
@@ -145,7 +151,7 @@ class ComparisonAgent(LLMClient):
                 "top3": [],
                 "selection_logic": "",
                 "preferred_genre": preferred_genre,
-                "all_movies": movies,
+                "all_movies": all_input_movies,
                 "metadata": {"error": f"ComparisonAgent failed: {exc}"},
             }
 

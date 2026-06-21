@@ -1,5 +1,4 @@
 google-genai
-openai
 requests
 fastapi
 uvicorn[standard]

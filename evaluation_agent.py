@@ -1,9 +1,6 @@
 import json
 import logging
-import os
 from typing import Any
-
-from openai import OpenAI
 
 from _llm_client import LLMClient
 from debug_logger import format_json, write_debug_file
@@ -14,22 +11,7 @@ logger = logging.getLogger(__name__)
 
 
 class EvaluationAgent(LLMClient):
-    MODEL_NAME = "nvidia/llama-3.3-nemotron-super-49b-v1"
-    LLM_TIMEOUT_SECONDS = 20.0
-
-    def __init__(self) -> None:
-        super().__init__()
-        api_key = os.getenv("NVIM_API_KEY")
-        self.client = (
-            OpenAI(
-                base_url="https://integrate.api.nvidia.com/v1",
-                api_key=api_key,
-                timeout=self.LLM_TIMEOUT_SECONDS,
-                max_retries=0,
-            )
-            if api_key
-            else None
-        )
+    MODEL_NAME = "gemini-3.1-flash-lite-preview"
 
     @staticmethod
     def _coerce_output(parsed: dict[str, Any]) -> dict[str, Any]:
@@ -45,6 +27,7 @@ class EvaluationAgent(LLMClient):
         comparison_output: dict[str, Any],
         parse_error: str = "",
         run_id: str = "",
+        attempt: int = 1,
     ) -> dict[str, Any]:
         top3 = comparison_output.get("top3", [])
         all_movies = comparison_output.get("all_movies", [])
@@ -121,7 +104,7 @@ class EvaluationAgent(LLMClient):
         }
         write_debug_file(
             run_id,
-            "07_evaluation_fallback_answer.txt",
+            f"07_evaluation_fallback_answer{LLMClient._attempt_suffix(attempt)}.txt",
             "EvaluationAgent fallback output\n\n"
             f"Reason: {parse_error or 'fallback_evaluation_used'}\n\n"
             f"{format_json(output)}\n",
@@ -133,6 +116,7 @@ class EvaluationAgent(LLMClient):
         sentiment_output: dict[str, Any],
         comparison_output: dict[str, Any],
         run_id: str = "",
+        attempt: int = 1,
     ) -> dict[str, Any]:
         enriched_top3 = sentiment_output.get("enriched_top3", [])
         top3 = comparison_output.get("top3", [])
@@ -160,18 +144,21 @@ class EvaluationAgent(LLMClient):
                 for movie in selected_movies
             ],
         }
+        suffix = self._attempt_suffix(attempt)
         logger.info(
-            "EvaluationAgent started: comparison_top3=%d sentiment_top3=%d",
+            "EvaluationAgent started: comparison_top3=%d sentiment_top3=%d attempt=%d",
             len(top3),
             len(enriched_top3),
+            attempt,
         )
 
         if not self.client:
             return self._fallback_evaluation(
                 sentiment_output=sentiment_output,
                 comparison_output=comparison_output,
-                parse_error="NVIM_API_KEY is missing.",
+                parse_error="GEMINI_API_KEY is missing.",
                 run_id=run_id,
+                attempt=attempt,
             )
 
         prompt_payload = {
@@ -198,23 +185,22 @@ class EvaluationAgent(LLMClient):
         }
         write_debug_file(
             run_id,
-            "06_evaluation_prompt.txt",
-            "EvaluationAgent prompt payload sent to NVIDIA\n\n"
+            f"06_evaluation_prompt{suffix}.txt",
+            "EvaluationAgent prompt payload sent to Gemini\n\n"
             f"Model: {self.MODEL_NAME}\n\n"
             f"{format_json(prompt_payload)}\n",
         )
 
         try:
-            response = self.client.chat.completions.create(
+            raw_text = self._gemini_generate(
+                json.dumps(prompt_payload, ensure_ascii=False),
                 model=self.MODEL_NAME,
-                messages=[{"role": "user", "content": json.dumps(prompt_payload, ensure_ascii=False)}],
                 temperature=0.2,
-                max_tokens=2048,
+                max_output_tokens=2048,
             )
-            raw_text = response.choices[0].message.content or ""
             write_debug_file(
                 run_id,
-                "07_evaluation_llm_answer.txt",
+                f"07_evaluation_llm_answer{suffix}.txt",
                 "EvaluationAgent raw LLM answer\n\n"
                 f"Model: {self.MODEL_NAME}\n\n"
                 f"{raw_text}\n",
@@ -229,6 +215,7 @@ class EvaluationAgent(LLMClient):
                     comparison_output=comparison_output,
                     parse_error=str(exc),
                     run_id=run_id,
+                    attempt=attempt,
                 )
 
             output = self._coerce_output(parsed)
@@ -242,7 +229,7 @@ class EvaluationAgent(LLMClient):
             logger.warning("EvaluationAgent failed; using fallback evaluation: %s", exc)
             write_debug_file(
                 run_id,
-                "07_evaluation_error.txt",
+                f"07_evaluation_error{suffix}.txt",
                 "EvaluationAgent failed before a valid parsed answer was produced.\n\n"
                 f"Error: {exc}\n\n"
                 f"Comparison output:\n{format_json(comparison_output)}\n\n"
@@ -253,6 +240,7 @@ class EvaluationAgent(LLMClient):
                 comparison_output=comparison_output,
                 parse_error=f"EvaluationAgent failed: {exc}",
                 run_id=run_id,
+                attempt=attempt,
             )
 
 
