@@ -4,4 +4,3 @@ requests
 fastapi
 uvicorn[standard]
 python-dotenv
-langchain
