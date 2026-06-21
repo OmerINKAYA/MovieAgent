@@ -1,13 +1,26 @@
 ---
 title: Movie Recommender Agent
-sdk: gradio
-sdk_version: "4.0"
-app_file: app.py
+sdk: docker
+app_port: 7860
 ---
 
 # Multi-Agent Movie Recommendation System
 
 This project is a multi-agent movie recommendation app. The user selects a genre, and the system fetches now-playing movies in Turkey from TMDB, evaluates candidates through four agents, and returns top recommendations with Turkish explanations and quality scoring.
+
+## Frontend
+
+A custom responsive (web + mobile) frontend built with plain HTML/CSS/JS, served by a small **FastAPI** backend:
+
+- `server.py` — FastAPI app: serves the UI and exposes `GET /api/genres` and `POST /api/recommend`.
+- `static/index.html`, `static/styles.css`, `static/app.js` — the UI. Cinemas are shown on Leaflet/OpenStreetMap maps; the location picker is revealed by the "Search with my location" toggle.
+
+Run locally:
+
+```bash
+uvicorn server:app --reload     # or: python server.py
+# open http://127.0.0.1:7860
+```
 
 ## 4-Agent Architecture
 
@@ -26,8 +39,9 @@ User (genre) → Discovery → Comparison → Sentiment → Evaluation → UI
 
 ## HuggingFace Spaces Setup
 
-Use these repository files:
-- `app.py` as the Gradio entrypoint
+Deploy as a **Docker** Space (the frontend is FastAPI, not Gradio). Key files:
+- `server.py` as the app entrypoint (serves on port 7860)
+- `static/` for the HTML/CSS/JS frontend
 - `requirements.txt` for dependencies
 
 Before running the Space, add these secrets in **Settings → Variables and secrets**:

@@ -1,0 +1,123 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#0b0b12" />
+  <title>Movie Recommender Agent</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+  <link rel="stylesheet" href="/static/styles.css" />
+</head>
+<body>
+  <div class="aurora" aria-hidden="true"></div>
+
+  <main class="app">
+    <!-- Hero -->
+    <header class="hero">
+      <span class="hero__badge">🎬 AI-powered · İstanbul</span>
+      <h1 class="hero__title">Movie Recommender&nbsp;Agent</h1>
+      <p class="hero__sub">
+        Pick a genre and four collaborating agents discover, compare, and review
+        what's playing in theaters — surfacing the three worth your night out.
+      </p>
+    </header>
+
+    <!-- Control panel -->
+    <section class="panel" aria-label="Search controls">
+      <div class="field">
+        <label class="field__label" for="genre">Preferred genre</label>
+        <div class="select-wrap">
+          <select id="genre" class="select"></select>
+          <svg class="select__chevron" viewBox="0 0 20 20" aria-hidden="true">
+            <path d="M5 7.5 10 12.5 15 7.5" fill="none" stroke="currentColor" stroke-width="1.8"
+              stroke-linecap="round" stroke-linejoin="round" />
+          </svg>
+        </div>
+      </div>
+
+      <label class="toggle" for="useLocation">
+        <input type="checkbox" id="useLocation" class="toggle__input" />
+        <span class="toggle__track"><span class="toggle__thumb"></span></span>
+        <span class="toggle__text">
+          <span class="toggle__title">📍 Search with my location</span>
+          <span class="toggle__hint">Show the map and rank cinemas by distance to you</span>
+        </span>
+      </label>
+
+      <button id="findBtn" class="btn" type="button">
+        <span class="btn__label">🎬 Find Movies</span>
+        <span class="btn__spinner" aria-hidden="true"></span>
+      </button>
+    </section>
+
+    <!-- Map panel (revealed by the toggle) -->
+    <section id="mapPanel" class="map-panel" hidden aria-label="Location picker">
+      <div class="map-panel__head">
+        <span class="map-panel__pin">📍</span>
+        <div>
+          <div class="map-panel__title">Pick your location</div>
+          <div id="mapStatus" class="map-panel__status">
+            Tap your spot on the map so we can rank cinemas by distance.
+          </div>
+        </div>
+      </div>
+      <div id="pickerMap" class="map-panel__map"></div>
+    </section>
+
+    <!-- Status / errors -->
+    <section id="status" class="status" hidden></section>
+
+    <!-- Results -->
+    <section id="results" class="results" aria-live="polite"></section>
+
+    <footer class="footer">
+      Showtimes via Biletinial · Maps © OpenStreetMap contributors
+    </footer>
+  </main>
+
+  <template id="movieCardTpl">
+    <article class="card">
+      <div class="card__top">
+        <div class="card__poster"><img alt="" loading="lazy" /></div>
+        <div class="card__main">
+          <div class="card__titlerow">
+            <h2 class="card__title"></h2>
+            <span class="badge"></span>
+          </div>
+          <p class="card__explanation"></p>
+          <div class="card__meta">
+            <span class="score-ring" title="Evaluation score">
+              <svg viewBox="0 0 44 44" aria-hidden="true">
+                <circle class="score-ring__bg" cx="22" cy="22" r="19" />
+                <circle class="score-ring__fg" cx="22" cy="22" r="19" />
+              </svg>
+              <span class="score-ring__num"></span>
+            </span>
+            <span class="card__closest"></span>
+          </div>
+        </div>
+      </div>
+      <button class="card__expand" type="button" aria-expanded="false">
+        <span class="card__expand-label"></span>
+        <svg class="card__expand-chevron" viewBox="0 0 20 20" aria-hidden="true">
+          <path d="M5 7.5 10 12.5 15 7.5" fill="none" stroke="currentColor" stroke-width="1.8"
+            stroke-linecap="round" stroke-linejoin="round" />
+        </svg>
+      </button>
+      <div class="card__details" hidden>
+        <div class="venues"></div>
+      </div>
+    </article>
+  </template>
+
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

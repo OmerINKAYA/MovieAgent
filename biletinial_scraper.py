@@ -1,6 +1,9 @@
 import html
+import json
 import logging
 import re
+import time
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin
 
@@ -22,10 +25,16 @@ class BiletinialScraper:
         max_movies: int = 80,
         comments_per_movie: int = 5,
         max_seance_dates: int = 3,
+        cache_dir: str = "cache",
+        cache_ttl_hours: float = 24.0,
+        use_cache: bool = True,
     ) -> None:
         self.max_movies = max_movies
         self.comments_per_movie = comments_per_movie
         self.max_seance_dates = max_seance_dates
+        self.cache_dir = Path(cache_dir)
+        self.cache_ttl_seconds = cache_ttl_hours * 3600
+        self.use_cache = use_cache
         self._venue_cache: dict[str, dict[str, Any]] = {}
         self.session = requests.Session()
         self.session.headers.update(
@@ -78,7 +87,7 @@ class BiletinialScraper:
         if not container_match:
             return []
 
-        cards = re.findall(r"<li>\s*(.*?)</li>", container_match.group(1), flags=re.S)
+        cards = re.findall(r"<li[^>]*>\s*(.*?)</li>", container_match.group(1), flags=re.S)
         movies: list[dict[str, Any]] = []
         for index, card in enumerate(cards[: self.max_movies], start=1):
             link_match = re.search(r'<h3>\s*<a[^>]+href="([^"]+)"[^>]+title="([^"]+)"', card)
@@ -126,23 +135,32 @@ class BiletinialScraper:
         movies: list[dict[str, Any]] = []
         page = 1
         while len(movies) < self.max_movies:
-            response = self.session.get(
-                f"{self.BASE_URL}/List/GetMoreItems",
-                params={
-                    "region": "tr-tr",
-                    "cityId": self.CITY_ID,
-                    "cityUrl": self.CITY_URL,
-                    "order": 0,
-                    "isKids": "false",
-                    "isCampaign": "false",
-                    "isForeign": "false",
-                    "organizerUrl": "sinema",
-                    "page": page,
-                },
-                timeout=20,
-            )
-            response.raise_for_status()
-            data = response.json()
+            try:
+                response = self.session.get(
+                    f"{self.BASE_URL}/tr-tr/List/GetMoreItems",
+                    params={
+                        "region": "tr-tr",
+                        "cityId": self.CITY_ID,
+                        "cityUrl": self.CITY_URL,
+                        "order": 0,
+                        "isKids": "false",
+                        "isCampaign": "false",
+                        "isForeign": "false",
+                        "organizerUrl": "sinema",
+                        "page": page,
+                    },
+                    timeout=20,
+                )
+                response.raise_for_status()
+                data = response.json()
+            except (requests.RequestException, ValueError) as exc:
+                # The pagination endpoint intermittently returns a non-JSON error
+                # page. Treat it as "no more items" instead of failing discovery —
+                # the main list page has already provided the primary results.
+                logger.warning(
+                    "Biletinial GetMoreItems failed on page %d: %s", page, exc
+                )
+                break
             items = data.get("items", [])
             for item in items:
                 seo_url = item.get("seoUrl", "")
@@ -217,7 +235,7 @@ class BiletinialScraper:
 
     def _fetch_available_seance_dates(self, event_id: str) -> list[str]:
         response = self.session.get(
-            f"{self.BASE_URL}/details/GetDateListForCity",
+            f"{self.BASE_URL}/tr-tr/details/GetDateListForCity",
             params={"eventId": event_id, "langId": 1, "cityId": self.CITY_ID},
             timeout=20,
         )
@@ -395,13 +413,69 @@ class BiletinialScraper:
             enriched["popularity"] = float(enriched["biletinial_comment_count"])
         return enriched
 
+    @property
+    def _cache_path(self) -> Path:
+        return self.cache_dir / f"biletinial_{self.CITY_URL}_{self.max_movies}.json"
+
+    def _read_cache(self) -> dict[str, Any] | None:
+        path = self._cache_path
+        if not path.exists():
+            return None
+        age = time.time() - path.stat().st_mtime
+        if age > self.cache_ttl_seconds:
+            logger.info(
+                "Biletinial cache expired (age %.1fh > ttl %.1fh)",
+                age / 3600,
+                self.cache_ttl_seconds / 3600,
+            )
+            return None
+        try:
+            with path.open(encoding="utf-8") as handle:
+                payload = json.load(handle)
+        except (OSError, ValueError) as exc:
+            logger.warning("Biletinial cache read failed: %s", exc)
+            return None
+        logger.info(
+            "BiletinialScraper using cache (age %.1fh, movies=%d)",
+            age / 3600,
+            len(payload.get("movies", [])),
+        )
+        return payload
+
+    def _write_cache(self, payload: dict[str, Any]) -> None:
+        path = self._cache_path
+        try:
+            self.cache_dir.mkdir(parents=True, exist_ok=True)
+            tmp_path = path.with_suffix(".tmp")
+            with tmp_path.open("w", encoding="utf-8") as handle:
+                json.dump(payload, handle, ensure_ascii=False)
+            tmp_path.replace(path)
+            logger.info("Biletinial cache written to %s", path)
+        except OSError as exc:
+            logger.warning("Biletinial cache write failed: %s", exc)
+
     def run(self) -> dict[str, Any]:
+        if self.use_cache:
+            cached = self._read_cache()
+            if cached is not None:
+                return cached
+        result = self._scrape()
+        if self.use_cache:
+            self._write_cache(result)
+        return result
+
+    def _scrape(self) -> dict[str, Any]:
         logger.info("BiletinialScraper started")
         page_html = self._get_html(self.LIST_URL)
         listed_movies = self._parse_list_page(page_html)
         seen_urls = {movie["detail_url"] for movie in listed_movies}
         if len(listed_movies) < self.max_movies:
-            for movie in self._fetch_more_list_items():
+            try:
+                more_movies = self._fetch_more_list_items()
+            except (requests.RequestException, ValueError) as exc:
+                logger.warning("Biletinial GetMoreItems fetch failed: %s", exc)
+                more_movies = []
+            for movie in more_movies:
                 if movie["detail_url"] in seen_urls:
                     continue
                 listed_movies.append(movie)
@@ -433,5 +507,6 @@ class BiletinialScraper:
                 "city_url": self.CITY_URL,
                 "total_fetched": len(listed_movies),
                 "total_after_filter": len(movies),
+                "fetched_at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
             },
         }

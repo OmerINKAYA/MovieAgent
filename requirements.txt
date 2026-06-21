@@ -1,6 +1,7 @@
 google-genai
 openai
 requests
-gradio
+fastapi
+uvicorn[standard]
 python-dotenv
 langchain
