@@ -8,6 +8,14 @@ app_port: 7860
 
 A multi-agent app that recommends movies currently playing in cinemas in İstanbul. The user picks a genre; the system scrapes live showtimes, ratings, and audience comments from [Biletinial](https://biletinial.com), runs the data through a chain of four agents, and returns the top 3 films with an English explanation, an audience-sentiment label, a quality score, and interactive cinema maps. If the user shares a location, each film also ranks its cinemas by distance.
 
+## Executive summary
+
+This project turns a live cinema-listings website into a self-checking recommendation engine. A single user input — a genre — flows through a deterministic data layer and four cooperating agents, and comes back as three vetted film recommendations with reasons, audience sentiment, a quality score, and maps to the nearest screenings.
+
+The design rests on three ideas. First, **real data over a static API**: every recommendation is grounded in what is actually showing in İstanbul today, scraped directly from Biletinial (showtimes, audience ratings, and real viewer comments) with no TMDB or third-party movie database in the loop. Second, **a labour-divided agent chain**: Discovery gathers and filters, Comparison selects the best three by genre fit, Sentiment reads the audience comments and writes the explanation, and Evaluation audits the whole decision. Only the last three use an LLM (Google Gemini); Discovery is pure code. Third — and what makes this more than a prompt chain — **an autonomous decision loop**: the orchestrator reads the Evaluation agent's 0–10 score, and if the picks fall short of the acceptance threshold it drops the weak films and asks Comparison for a different set, retrying up to three times and keeping the best-scoring attempt. The Evaluation agent is the system judging its own work, and the orchestrator acts on that judgement.
+
+Reliability is a first-class concern throughout. Every LLM agent degrades to a rule-based fallback if the API key is missing or a call ultimately fails, so the pipeline always returns a usable answer rather than an error. Scraping results are cached for 24 hours, LLM calls retry on transient failures, and every run writes a full step-by-step debug trace (prompts, raw answers, and the decision log) to disk. The result is delivered through a lightweight FastAPI backend and a custom plain HTML/CSS/JS frontend with Leaflet maps — no Gradio, no heavy frontend framework — and ships as a Docker image suitable for HuggingFace Spaces.
+
 ## Architecture at a glance
 
 ```
@@ -100,6 +108,26 @@ MOVIE_AGENT_DEBUG_LOG_DIR  — directory for per-run debug logs (defaults to ./l
 ## HuggingFace Spaces setup
 
 This is configured as a **Docker** Space (the front matter sets `sdk: docker` and `app_port: 7860`). A Docker Space requires a `Dockerfile` at the repo root that installs `requirements.txt` and starts the server on port 7860, e.g. `uvicorn server:app --host 0.0.0.0 --port 7860`. Add `GEMINI_API_KEY` under **Settings → Variables and secrets** (never commit `.env`).
+
+## Practitioner notes
+
+These are the things worth knowing before you change, deploy, or debug this code — the parts that aren't obvious from the architecture diagram.
+
+**The scraper is the most fragile component, and the cache hides it.** `biletinial_scraper.py` parses Biletinial's HTML with hand-written regexes against specific markup (`eventListContainer`, `yds_genres_link`, `yn_cinema`, the `İzleyici Puanı` rating block, etc.). If Biletinial changes its templates, these silently return empty results rather than throwing, and the downstream agents will just see fewer films. When recommendations suddenly look thin or wrong, suspect the scraper first. Note that results are cached for 24 hours under `cache/biletinial_istanbul_80.json`, so during development you may be debugging stale data — delete the cache file (or pass `use_cache=False`) to force a fresh scrape.
+
+**A full cold scrape is slow and sequential.** For up to ~80 films the scraper fetches the listing, then for each film a detail page, its comments, its available seance dates, and a seance page per date, plus a venue page per cinema. There is no concurrency. The 24-hour cache and the in-memory venue cache are what make this practical — the first uncached request can take a while, so don't mistake that latency for a hang. If you ever need to speed this up, parallelising the per-film enrichment is the highest-leverage change.
+
+**`agents.md` is partially out of date — trust the code, not that file.** It still describes an earlier TMDB-based design (`region=TR`, `gemini-2.5-flash-lite`, Turkish-language reasons, vote-count filters). The shipped system scrapes Biletinial, runs every LLM agent on `gemini-3.1-flash-lite-preview`, and produces English `reason`/`explanation`/`feedback` text. Use `agents.md` for the high-level intent and the data-flow diagram, but rely on the source files for actual behaviour, field names, and model strings.
+
+**Genre values are Turkish on purpose.** The UI shows English labels but sends Turkish values (`Action → Aksiyon`) because Comparison matches against Biletinial's Turkish genre names. If you add a genre in `server.py`'s `GENRE_CHOICES`, the value must match Biletinial's spelling exactly, or genre matching (and the Evaluation agent's genre-fit penalty) will silently fail for it.
+
+**Fallbacks mean failures are quiet by design.** A missing or broken `GEMINI_API_KEY` does not crash the app: Comparison returns an empty top 3 (and surfaces an error to the UI), while Sentiment and Evaluation fall back to rule-based scoring derived from the audience rating, sentiment, and comment count. This is great for resilience but means a degraded run can look like a successful one. To confirm the LLMs actually ran, check the per-run files in `llm_logs/<run>/` — `fallback_*` filenames and `warning` fields in the output indicate the rule-based path was taken.
+
+**Score scales are normalised in two places.** The Evaluation LLM is asked for 0–10 but occasionally answers 0–1; `orchestrator._normalized_overall` and `server._normalize_score` both rescale so the `7.0` accept threshold and the displayed score stay consistent. If you change the scoring scale, update both.
+
+**Every run leaves a full audit trail.** The orchestrator writes numbered debug files per run (`00_all_biletinial_films` → `08_decision_loop`), including each agent's exact prompt, the raw LLM answer, and the decision log. This is the fastest way to understand why a particular recommendation was made or why the loop retried. In Docker these go to `/tmp/llm_logs` (set via `MOVIE_AGENT_DEBUG_LOG_DIR` in the Dockerfile) because the working directory may be read-only on Spaces.
+
+**There is no automated test suite.** Each agent file has an `if __name__ == "__main__"` block with mock inputs for manual smoke-testing (e.g. `python comparison_agent.py`), and `discovery_agent.py` will hit the live site. These are handy for isolating a single stage, but treat them as smoke tests, not coverage — there are no assertions guarding regressions.
 
 ## Dependencies
 
